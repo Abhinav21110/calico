@@ -382,6 +382,107 @@ var xdpV6TestCases = []xdpTestV6{
 		Metadata: false,
 		IPProto:  layers.IPProtocolUDP,
 	},
+	{
+		Description: "10 - Link-local address should pass",
+		Rules:       &allowAllRulesXDP,
+		IPv6Header: &layers.IPv6{
+			Version:  6,
+			HopLimit: 64,
+			SrcIP:    net.ParseIP("fe80::1"),
+			DstIP:    net.ParseIP("fe80::2"),
+		},
+		NextHeader: &layers.TCP{
+			DstPort: 80,
+			SrcPort: 55555,
+		},
+		Drop:     false,
+		Metadata: true,
+		IPProto:  layers.IPProtocolTCP,
+	},
+	{
+		Description: "11 - Multicast address with deny rule",
+		Rules:       &denyAllRulesXDP,
+		IPv6Header: &layers.IPv6{
+			Version:  6,
+			HopLimit: 64,
+			SrcIP:    net.ParseIP("2001:db8::1"),
+			DstIP:    net.ParseIP("ff02::1"),
+		},
+		NextHeader: &layers.UDP{
+			DstPort: 5353,
+			SrcPort: 54321,
+		},
+		Drop:     true,
+		Metadata: false,
+		IPProto:  layers.IPProtocolUDP,
+	},
+	{
+		Description: "12 - ULA (Unique Local Address) should be filtered",
+		Rules:       &oneXDPRule,
+		IPv6Header: &layers.IPv6{
+			Version:  6,
+			HopLimit: 64,
+			SrcIP:    net.ParseIP("fc00::1"),
+			DstIP:    net.ParseIP("fc00::2"),
+		},
+		NextHeader: &layers.TCP{
+			DstPort: 443,
+			SrcPort: 55555,
+		},
+		Drop:     false,
+		Metadata: false,
+		IPProto:  layers.IPProtocolTCP,
+	},
+	{
+		Description: "13 - ICMPv6 Neighbor Solicitation must pass",
+		Rules:       nil,
+		IPv6Header: &layers.IPv6{
+			Version:  6,
+			HopLimit: 255,
+			SrcIP:    net.ParseIP("fe80::1"),
+			DstIP:    net.ParseIP("ff02::1:ff00:2"),
+		},
+		NextHeader: &layers.ICMPv6{
+			TypeCode: layers.CreateICMPv6TypeCode(layers.ICMPv6TypeNeighborSolicitation, 0),
+		},
+		Drop:     false,
+		Metadata: false,
+		IPProto:  layers.IPProtocolICMPv6,
+	},
+	{
+		Description: "14 - Global unicast address with allow policy",
+		Rules:       &allowAllRulesXDP,
+		IPv6Header: &layers.IPv6{
+			Version:  6,
+			HopLimit: 64,
+			SrcIP:    net.ParseIP("2001:db8::1"),
+			DstIP:    net.ParseIP("2001:db8::2"),
+		},
+		NextHeader: &layers.TCP{
+			DstPort: 8080,
+			SrcPort: 55555,
+		},
+		Drop:     false,
+		Metadata: true,
+		IPProto:  layers.IPProtocolTCP,
+	},
+	{
+		Description: "15 - IPv6 fragment with deny rule",
+		Rules:       &denyAllRulesXDP,
+		IPv6Header: &layers.IPv6{
+			Version:  6,
+			HopLimit: 64,
+			SrcIP:    net.ParseIP("2001:db8::100"),
+			DstIP:    net.ParseIP("2001:db8::200"),
+		},
+		NextHeader: &layers.TCP{
+			DstPort: 80,
+			SrcPort: 55555,
+		},
+		Drop:     true,
+		Metadata: false,
+		IPProto:  layers.IPProtocolTCP,
+	},
 }
 
 func TestXDPV6Programs(t *testing.T) {

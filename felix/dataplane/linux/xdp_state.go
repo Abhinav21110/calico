@@ -99,6 +99,7 @@ import (
 
 type xdpState struct {
 	ipV4State *xdpIPState
+	ipV6State *xdpIPState
 	common    xdpStateCommon
 }
 
@@ -107,12 +108,12 @@ func NewXDPState(allowGenericXDP bool) (*xdpState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewXDPStateWithBPFLibrary(lib, allowGenericXDP), nil
+	return NewXDPStateWithBPFLibrary(lib, allowGenericXDP, false), nil
 }
 
-func NewXDPStateWithBPFLibrary(library bpf.BPFDataplane, allowGenericXDP bool) *xdpState {
-	log.Debug("Created new xdpState.")
-	return &xdpState{
+func NewXDPStateWithBPFLibrary(library bpf.BPFDataplane, allowGenericXDP bool, ipv6Enabled bool) *xdpState {
+	log.WithField("ipv6Enabled", ipv6Enabled).Debug("Created new xdpState.")
+	state := &xdpState{
 		ipV4State: newXDPIPState(4),
 		common: xdpStateCommon{
 			programTag: "",
@@ -121,6 +122,11 @@ func NewXDPStateWithBPFLibrary(library bpf.BPFDataplane, allowGenericXDP bool) *
 			xdpModes:   getXDPModes(allowGenericXDP),
 		},
 	}
+	if ipv6Enabled {
+		state.ipV6State = newXDPIPState(6)
+		log.Debug("IPv6 XDP state initialized")
+	}
+	return state
 }
 
 func membersToSet(members []string) set.Set[string] {
@@ -136,23 +142,53 @@ func (x *xdpState) OnUpdate(protoBufMsg interface{}) {
 	log.WithField("msg", protoBufMsg).Debug("Received message")
 	switch msg := protoBufMsg.(type) {
 	case *proto.IPSetDeltaUpdate:
-		log.WithField("ipSetId", msg.Id).Debug("IP set delta update")
+		log.WithFields(log.Fields{
+			"ipSetId": msg.Id,
+			"added":   len(msg.AddedMembers),
+			"removed": len(msg.RemovedMembers),
+		}).Debug("IP set delta update")
 		x.ipV4State.addMembersIPSet(msg.Id, membersToSet(msg.AddedMembers))
 		x.ipV4State.removeMembersIPSet(msg.Id, membersToSet(msg.RemovedMembers))
+		if x.ipV6State != nil {
+			x.ipV6State.addMembersIPSet(msg.Id, membersToSet(msg.AddedMembers))
+			x.ipV6State.removeMembersIPSet(msg.Id, membersToSet(msg.RemovedMembers))
+			log.WithField("ipSetId", msg.Id).Debug("IPv6 IP set delta update applied")
+		}
 	case *proto.IPSetUpdate:
-		log.WithField("ipSetId", msg.Id).Debug("IP set update")
+		log.WithFields(log.Fields{
+			"ipSetId": msg.Id,
+			"members": len(msg.Members),
+		}).Debug("IP set update")
 		x.ipV4State.replaceIPSet(msg.Id, membersToSet(msg.Members))
+		if x.ipV6State != nil {
+			x.ipV6State.replaceIPSet(msg.Id, membersToSet(msg.Members))
+			log.WithFields(log.Fields{
+				"ipSetId": msg.Id,
+				"members": len(msg.Members),
+			}).Debug("IPv6 IP set update applied")
+		}
 	case *proto.IPSetRemove:
 		log.WithField("ipSetId", msg.Id).Debug("IP set remove")
 		x.ipV4State.removeIPSet(msg.Id)
+		if x.ipV6State != nil {
+			x.ipV6State.removeIPSet(msg.Id)
+		}
 	case *proto.ActivePolicyUpdate:
 		id := types.ProtoToPolicyID(msg.GetId())
 		log.WithField("id", msg.Id).Debug("Updating policy chains")
 		x.ipV4State.updatePolicy(id, msg.Policy)
+		if x.ipV6State != nil {
+			x.ipV6State.updatePolicy(id, msg.Policy)
+			log.WithField("id", msg.Id).Debug("IPv6 policy chains updated")
+		}
 	case *proto.ActivePolicyRemove:
 		id := types.ProtoToPolicyID(msg.GetId())
 		log.WithField("id", msg.Id).Debug("Removing policy chains")
 		x.ipV4State.removePolicy(id)
+		if x.ipV6State != nil {
+			x.ipV6State.removePolicy(id)
+			log.WithField("id", msg.Id).Debug("IPv6 policy chains removed")
+		}
 	}
 }
 
@@ -171,6 +207,16 @@ func (x *xdpState) PopulateCallbacks(cbs *common.Callbacks) {
 		}
 		x.ipV4State.cbIDs = append(x.ipV4State.cbIDs, cbIDs...)
 	}
+	if x.ipV6State != nil {
+		cbIDs := []*common.CbID{
+			cbs.AddInterfaceV4.Append(x.ipV6State.addInterface),
+			cbs.RemoveInterfaceV4.Append(x.ipV6State.removeInterface),
+			cbs.UpdateInterfaceV4.Append(x.ipV6State.updateInterface),
+			cbs.UpdateHostEndpointV4.Append(x.ipV6State.updateHostEndpoint),
+			cbs.RemoveHostEndpointV4.Append(x.ipV6State.removeHostEndpoint),
+		}
+		x.ipV6State.cbIDs = append(x.ipV6State.cbIDs, cbIDs...)
+	}
 }
 
 func (x *xdpState) DepopulateCallbacks(cbs *common.Callbacks) {
@@ -179,6 +225,12 @@ func (x *xdpState) DepopulateCallbacks(cbs *common.Callbacks) {
 			cbs.Drop(id)
 		}
 		x.ipV4State.cbIDs = nil
+	}
+	if x.ipV6State != nil {
+		for _, id := range x.ipV6State.cbIDs {
+			cbs.Drop(id)
+		}
+		x.ipV6State.cbIDs = nil
 	}
 }
 
@@ -189,6 +241,9 @@ func (x *xdpState) QueueResync() {
 func (x *xdpState) ProcessPendingDiffState(epSourceV4 endpointsSource) {
 	if x.ipV4State != nil {
 		x.ipV4State.processPendingDiffState(epSourceV4)
+	}
+	if x.ipV6State != nil {
+		x.ipV6State.processPendingDiffState(epSourceV4)
 	}
 }
 
@@ -228,6 +283,16 @@ func (x *xdpState) ApplyBPFActions(ipsSource ipsetsSource) error {
 			return err
 		}
 	}
+	if x.ipV6State != nil {
+		memberCacheV6 := newXDPMemberCache(x.ipV6State.getBpfIPFamily(), x.common.bpfLib)
+		err := x.ipV6State.bpfActions.apply(memberCacheV6, x.ipV6State.ipsetIDsToMembers, newConvertingIPSetsSource(ipsSource), x.common.xdpModes)
+		x.ipV6State.bpfActions = newXDPBPFActions()
+		if err != nil {
+			log.WithError(err).Info("Applying BPF actions did not succeed. Queueing XDP resync.")
+			x.QueueResync()
+			return err
+		}
+	}
 	return nil
 }
 
@@ -241,12 +306,24 @@ func (x *xdpState) ProcessMemberUpdates() error {
 			return err
 		}
 	}
+	if x.ipV6State != nil {
+		memberCacheV6 := newXDPMemberCache(x.ipV6State.getBpfIPFamily(), x.common.bpfLib)
+		err := x.ipV6State.processMemberUpdates(memberCacheV6)
+		if err != nil {
+			log.WithError(err).Info("Processing member updates did not succeed. Queueing XDP resync.")
+			x.QueueResync()
+			return err
+		}
+	}
 	return nil
 }
 
 func (x *xdpState) DropPendingDiffState() {
 	if x.ipV4State != nil {
 		x.ipV4State.pendingDiffState = newXDPPendingDiffState()
+	}
+	if x.ipV6State != nil {
+		x.ipV6State.pendingDiffState = newXDPPendingDiffState()
 	}
 }
 
@@ -255,20 +332,26 @@ func (x *xdpState) UpdateState() {
 		x.ipV4State.currentState, x.ipV4State.newCurrentState = x.ipV4State.newCurrentState, nil
 		x.ipV4State.cleanupCache()
 	}
+	if x.ipV6State != nil {
+		x.ipV6State.currentState, x.ipV6State.newCurrentState = x.ipV6State.newCurrentState, nil
+		x.ipV6State.cleanupCache()
+	}
 }
 
 // WipeXDP clears any previously set XDP state, returning an error if synchronization fails.
 func (x *xdpState) WipeXDP() error {
 	savedIPV4State := x.ipV4State
+	savedIPV6State := x.ipV6State
 	x.ipV4State = newXDPIPState(4)
 	x.ipV4State.newCurrentState = newXDPSystemState()
+	if x.ipV6State != nil {
+		x.ipV6State = newXDPIPState(6)
+		x.ipV6State.newCurrentState = newXDPSystemState()
+	}
 	defer func() {
 		x.ipV4State = savedIPV4State
+		x.ipV6State = savedIPV6State
 	}()
-	// Nil source, we are not going to use it anyway,
-	// because we are about to drop everything, and when
-	// we only drop stuff, the code does not call
-	// ipsetsSource functions at all.
 	ipsSource := &nilIPSetsSource{}
 	if err := x.tryResync(ipsSource); err != nil {
 		return err
@@ -290,6 +373,11 @@ func (x *xdpState) tryResync(ipsSourceV4 ipsetsSource) error {
 	}
 	if x.ipV4State != nil {
 		if err := x.ipV4State.tryResync(&x.common, ipsSourceV4); err != nil {
+			return err
+		}
+	}
+	if x.ipV6State != nil {
+		if err := x.ipV6State.tryResync(&x.common, ipsSourceV4); err != nil {
 			return err
 		}
 	}

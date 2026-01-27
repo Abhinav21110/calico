@@ -447,7 +447,7 @@ var _ = Describe("XDP state", func() {
 
 			DescribeTable("",
 				func(s testStruct) {
-					state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), true)
+					state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), true, false)
 					ipState := state.ipV4State
 					cs := ipState.currentState
 					expectedNcs := newXDPSystemState()
@@ -1735,7 +1735,7 @@ var _ = Describe("XDP state", func() {
 			DescribeTable("resync",
 				func(s testStruct) {
 					lib, programTag := bpfStateToBpfLib(s.bpfState)
-					state := NewXDPStateWithBPFLibrary(lib, false)
+					state := NewXDPStateWithBPFLibrary(lib, false, false)
 					state.common.programTag = programTag
 					ipState := state.ipV4State
 					ipState.newCurrentState = newXDPSystemState()
@@ -2196,7 +2196,7 @@ var _ = Describe("XDP state", func() {
 					family := bpf.IPFamilyV4
 					lib := stateToBPFDataplane(bpfState, family)
 					memberCache := newXDPMemberCache(family, lib)
-					state := NewXDPStateWithBPFLibrary(lib, true)
+					state := NewXDPStateWithBPFLibrary(lib, true, false)
 					ipState := state.ipV4State
 					ipState.newCurrentState = newXDPSystemState()
 					testStateToRealState(s.newCurrentState, nil, ipState.newCurrentState)
@@ -2411,7 +2411,7 @@ var _ = Describe("XDP state", func() {
 					},
 				},
 			}
-			state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), true)
+			state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), true, false)
 			ipState := state.ipV4State
 			testStateToRealState(testState, nil, ipState.currentState)
 			cache := ipState.ipsetIDsToMembers
@@ -2466,7 +2466,7 @@ var _ = Describe("XDP state", func() {
 
 			DescribeTable("",
 				func(s testStruct) {
-					state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), false)
+					state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), false, false)
 					state.ipV4State.bpfActions.InstallXDP.AddAll(s.install)
 					state.ipV4State.bpfActions.UninstallXDP.AddAll(s.uninstall)
 					state.ipV4State.bpfActions.CreateMap.AddAll(s.create)
@@ -2711,7 +2711,7 @@ var _ = Describe("XDP state", func() {
 
 			DescribeTable("",
 				func(s testStruct) {
-					state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), true)
+					state := NewXDPStateWithBPFLibrary(bpf.NewMockBPFLib("../../bpf-apache/bin"), true, false)
 					state.ipV4State.newCurrentState = newXDPSystemState()
 					ipsetsSrc := &nilIPSetsSource{}
 					resyncState, err := state.ipV4State.newXDPResyncState(state.common.bpfLib, ipsetsSrc, state.common.programTag, state.common.xdpModes)

@@ -44,6 +44,8 @@ const (
 var (
 	_ = describeXDPTests("tcp")
 	_ = describeXDPTests("udp")
+	_ = describeXDPTestsIPv6("tcp")
+	_ = describeXDPTestsIPv6("udp")
 )
 
 func describeXDPTests(proto string) bool {
@@ -518,4 +520,142 @@ func xdpProgramID(felix *infrastructure.Felix, iface string) int {
 
 func xdpProgramAttached(felix *infrastructure.Felix, iface string) bool {
 	return xdpProgramID(felix, iface) != 0
+}
+
+func describeXDPTestsIPv6(proto string) bool {
+	return infrastructure.DatastoreDescribe(
+		fmt.Sprintf("_BPF-SAFE_ XDP IPv6 tests with initialized Felix proto=%s", proto),
+		[]apiconfig.DatastoreType{apiconfig.EtcdV3},
+		func(getInfra infrastructure.InfraFactory) {
+			xdpTestIPv6(getInfra, proto)
+		})
+}
+
+func xdpTestIPv6(getInfra infrastructure.InfraFactory, proto string) {
+	var (
+		infra  infrastructure.DatastoreInfra
+		tc     infrastructure.TopologyContainers
+		hostW  [2]*workload.Workload
+		client client.Interface
+		cc     *connectivity.Checker
+	)
+
+	BeforeEach(func() {
+		if err := bpf.SupportsXDP(); err != nil {
+			Skip(fmt.Sprintf("XDP acceleration not supported: %v", err))
+		}
+		infra = getInfra()
+		opts := infrastructure.DefaultTopologyOptions()
+		opts.EnableIPv6 = true
+
+		opts.ExtraEnvVars = map[string]string{
+			"FELIX_GENERICXDPENABLED":  "1",
+			"FELIX_XDPREFRESHINTERVAL": "10",
+			"FELIX_XDPENABLED":         "true",
+			"FELIX_IPV6SUPPORT":        "true",
+			"FELIX_LOGSEVERITYSCREEN":  "debug",
+			"FELIX_FAILSAFEINBOUNDHOSTPORTS": "tcp:22, udp:68, tcp:179, tcp:2379, tcp:2380, " +
+				"tcp:5473, tcp:6443, tcp:6666, tcp:6667, " + proto + ":1234",
+		}
+
+		roles := []string{"client", "server"}
+		tc, client = infrastructure.StartNNodeTopology(len(roles), opts, infra)
+
+		err := infra.AddAllowToDatastore("host-endpoint=='true'")
+		Expect(err).NotTo(HaveOccurred())
+
+		for ii, felix := range tc.Felixes {
+			hostW[ii] = workload.Run(
+				tc.Felixes[ii],
+				fmt.Sprintf("host%d-v6", ii),
+				"",
+				tc.Felixes[ii].IPv6,
+				"8055,8056,1234",
+				proto)
+
+			hostEp := v3.NewHostEndpoint()
+			hostEp.Name = fmt.Sprintf("host-endpoint-v6-%d", ii)
+			hostEp.Labels = map[string]string{
+				"host-endpoint": "true",
+				"proto":         proto,
+				"role":          roles[ii],
+			}
+			hostEp.Spec.Node = felix.Hostname
+			hostEp.Spec.InterfaceName = "eth0"
+			hostEp.Spec.ExpectedIPs = []string{felix.IPv6}
+			_, err = client.HostEndpoints().Create(utils.Ctx, hostEp, utils.NoOptions)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		cc = &connectivity.Checker{Protocol: proto}
+	})
+
+	clnt, srvr := 0, 1
+
+	It("should have no connectivity initially", func() {
+		cc.ExpectNone(tc.Felixes[clnt], hostW[srvr].Port(8055))
+		cc.CheckConnectivityOffset(1)
+		cc.ResetExpectations()
+	})
+
+	Context("with IPv6 XDP blocklist policy", func() {
+		BeforeEach(func() {
+			order := float64(20)
+
+			allowAllPolicy := v3.NewGlobalNetworkPolicy()
+			allowAllPolicy.Name = "allow-all-v6"
+			allowAllPolicy.Spec.Order = &order
+			allowAllPolicy.Spec.Selector = "all()"
+			allowAllPolicy.Spec.Ingress = []v3.Rule{{
+				Action: v3.Allow,
+			}}
+			allowAllPolicy.Spec.Egress = []v3.Rule{{
+				Action: v3.Allow,
+			}}
+			_, err := client.GlobalNetworkPolicies().Create(utils.Ctx, allowAllPolicy, utils.NoOptions)
+			Expect(err).NotTo(HaveOccurred())
+
+			blockPolicy := v3.NewGlobalNetworkPolicy()
+			blockPolicy.Name = "xdp-block-v6"
+			blockPolicy.Spec.Order = &order
+			blockPolicy.Spec.Selector = "role=='server'"
+			blockPolicy.Spec.DoNotTrack = true
+			blockPolicy.Spec.ApplyOnForward = false
+			blockPolicy.Spec.Ingress = []v3.Rule{{
+				Action: v3.Deny,
+				Source: v3.EntityRule{
+					Selector: "role=='client'",
+				},
+			}}
+			_, err = client.GlobalNetworkPolicies().Create(utils.Ctx, blockPolicy, utils.NoOptions)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should have XDP program attached to server interface", func() {
+			Eventually(func() bool {
+				return xdpProgramAttached(tc.Felixes[srvr], "eth0")
+			}, "10s", "1s").Should(BeTrue())
+		})
+
+		It("should block IPv6 traffic from client to server", func() {
+			Eventually(func() bool {
+				return xdpProgramAttached(tc.Felixes[srvr], "eth0")
+			}, "10s", "1s").Should(BeTrue())
+
+			cc.ExpectNone(tc.Felixes[clnt], hostW[srvr].Port(8055))
+			cc.ExpectNone(tc.Felixes[clnt], hostW[srvr].Port(8056))
+			cc.CheckConnectivityOffset(1)
+			cc.ResetExpectations()
+		})
+
+		It("should allow IPv6 failsafe port 1234", func() {
+			Eventually(func() bool {
+				return xdpProgramAttached(tc.Felixes[srvr], "eth0")
+			}, "10s", "1s").Should(BeTrue())
+
+			cc.ExpectSome(tc.Felixes[clnt], hostW[srvr].Port(1234))
+			cc.CheckConnectivityOffset(1)
+			cc.ResetExpectations()
+		})
+	})
 }

@@ -762,30 +762,33 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 			log.WithError(err).Warn("Can't enable XDP acceleration.")
 			config.XDPEnabled = false
 		} else if !config.BPFEnabled {
-			st, err := NewXDPState(config.XDPAllowGeneric)
+			lib, err := bpf.NewBPFLib("/usr/lib/calico/bpf/")
 			if err != nil {
 				log.WithError(err).Warn("Can't enable XDP acceleration.")
 			} else {
+				st := NewXDPStateWithBPFLibrary(lib, config.XDPAllowGeneric, config.IPv6Enabled)
 				dp.xdpState = st
 				dp.xdpState.PopulateCallbacks(callbacks)
 				dp.RegisterManager(st)
-				log.Info("XDP acceleration enabled.")
+				if config.IPv6Enabled {
+					log.Info("XDP acceleration enabled for IPv4 and IPv6.")
+				} else {
+					log.Info("XDP acceleration enabled for IPv4.")
+				}
 			}
 		}
 	} else {
 		log.Info("XDP acceleration disabled.")
 	}
 
-	// TODO Support cleaning up non-BPF XDP state from a previous Felix run, when BPF mode has just been enabled.
 	if !config.BPFEnabled && dp.xdpState == nil {
-		xdpState, err := NewXDPState(config.XDPAllowGeneric)
+		lib, err := bpf.NewBPFLib("/usr/lib/calico/bpf/")
 		if err == nil {
+			xdpState := NewXDPStateWithBPFLibrary(lib, config.XDPAllowGeneric, config.IPv6Enabled)
 			if err := xdpState.WipeXDP(); err != nil {
 				log.WithError(err).Warn("Failed to cleanup preexisting XDP state")
 			}
 		}
-		// if we can't create an XDP state it means we couldn't get a working
-		// bpffs so there's nothing to clean up
 	}
 
 	if config.SidecarAccelerationEnabled {
