@@ -4760,7 +4760,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 							cc.ExpectNone(externalClient, TargetIP(felixIP(1)), npPort)
 							cc.CheckConnectivity()
 
-							Eventually(func() int { return tcpdump.MatchCount("ICMP") }).
+							Eventually(func() int { return tcpdump.MatchCount("ICMP") }, 10*time.Second, 200*time.Millisecond).
 								Should(BeNumerically(">", 0), matcher)
 						})
 					})
@@ -4796,7 +4796,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 
 								cc.ExpectNone(externalClient, TargetIP(felixIP(1)), npPort)
 								cc.CheckConnectivity()
-								Eventually(func() int { return tcpdump.MatchCount("ICMP") }).
+								Eventually(func() int { return tcpdump.MatchCount("ICMP") }, 10*time.Second, 200*time.Millisecond).
 									Should(BeNumerically(">", 0), matcher)
 							})
 						}
@@ -4819,7 +4819,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 
 							cc.ExpectNone(w[1][1], TargetIP(tgtWorkload.IP), uint16(tgtPort))
 							cc.CheckConnectivity()
-							Eventually(func() int { return tcpdump.MatchCount("ICMP") }).
+							Eventually(func() int { return tcpdump.MatchCount("ICMP") }, 10*time.Second, 200*time.Millisecond).
 								Should(BeNumerically(">", 0), matcher)
 						})
 
@@ -4868,18 +4868,16 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 
 				hostIP0 := TargetIP(felixIP(0))
 				hostPort := uint16(8080)
+				target := net.JoinHostPort(w[0][0].IP, "8055")
+
 				var (
-					target    string
 					tool      string
 					nftFamily string
 				)
-
 				if testOpts.ipv6 {
-					target = fmt.Sprintf("[%s]:8055", w[0][0].IP)
 					tool = "ip6tables"
 					nftFamily = "ip6"
 				} else {
-					target = fmt.Sprintf("%s:8055", w[0][0].IP)
 					tool = "iptables"
 					nftFamily = "ip"
 				}
@@ -4980,6 +4978,13 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 				pol = createPolicy(pol)
 
 				pc = nil
+				if NFTMode() && testOpts.ipv6 && !testOpts.dsr && testOpts.tunnel == "none" && testOpts.connTimeEnabled {
+					// In NFT mode, we add the kube-proxy tables.
+					tc.Felixes[0].Exec("nft", "add", "table", "ip", "kube-proxy")
+					tc.Felixes[0].Exec("nft", "add", "chain", "ip", "kube-proxy", "KUBE-TEST", "{ type filter hook forward priority 0 ; }")
+					tc.Felixes[0].Exec("nft", "add", "table", "ip6", "kube-proxy")
+					tc.Felixes[0].Exec("nft", "add", "chain", "ip6", "kube-proxy", "KUBE-TEST", "{ type filter hook forward priority 0 ; }")
+				}
 			})
 
 			AfterEach(func() {
@@ -5008,6 +5013,12 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 
 				// Wait for BPF to be active.
 				ensureAllNodesBPFProgramsAttached(tc.Felixes)
+				if NFTMode() && testOpts.ipv6 && !testOpts.dsr && testOpts.tunnel == "none" && testOpts.connTimeEnabled {
+					Eventually(func() string {
+						out, _ := tc.Felixes[0].ExecOutput("nft", "list", "tables")
+						return out
+					}, "15s", "1s").ShouldNot(ContainSubstring("kube-proxy"))
+				}
 			}
 
 			expectPongs := func() {
